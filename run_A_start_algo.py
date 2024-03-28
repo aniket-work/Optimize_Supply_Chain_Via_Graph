@@ -86,6 +86,14 @@ print(f"Graph exported to '{graph_html_file}'")
 # Open the HTML file in a web browser
 webbrowser.open_new_tab(graph_html_file)
 
+import random
+
+def get_latitude_for_node(node):
+    return random.uniform(-90.0, 90.0)  # Generate random latitude between -90 and 90
+
+def get_longitude_for_node(node):
+    return random.uniform(-180.0, 180.0)  # Generate random longitude between -180 and 180
+
 
 def networkx_to_neo4j(G, uri, user, password):
     try:
@@ -101,8 +109,13 @@ def networkx_to_neo4j(G, uri, user, password):
             for node in G.nodes:
                 node_type = node.split()[0]
                 node_label = node_type.capitalize()
-                query = f"CREATE (n:{node_label} {{name: $name}})"
-                session.run(query, name=node)
+
+                # Get latitude and longitude (you'll need to implement this part)
+                node_latitude = get_latitude_for_node(node)
+                node_longitude = get_longitude_for_node(node)
+
+                query = f"CREATE (n:{node_label} {{name: $name, latitude: $latitude, longitude: $longitude}})"
+                session.run(query, name=node, latitude=node_latitude, longitude=node_longitude)
 
             # Create relationships in Neo4j
             for source, target, edge_data in G.edges(data=True):
@@ -119,11 +132,73 @@ def networkx_to_neo4j(G, uri, user, password):
             driver.close()
 
 
+from neo4j import GraphDatabase
+
+def run_astar_algo(uri, user, password, source_node, target_node):
+    driver = GraphDatabase.driver(uri, auth=(user, password))
+
+    query_project_graph = """
+           CALL gds.graph.project(
+               'supplyChainGraph',
+               ['Factory', 'Warehouse', 'Distribution', 'Retail'],
+               'TRANSPORTS',
+                {
+                    nodeProperties: ['latitude', 'longitude'],
+                    relationshipProperties: 'weight'
+                }
+           )
+       """
+
+    query_astar_algo = f"""
+            MATCH (source:Factory {{name: $source_node}}), (target:Retail {{name: $target_node}})
+            CALL gds.shortestPath.astar.stream('supplyChainGraph', {{
+                sourceNode: source,
+                targetNode: target,
+                latitudeProperty: 'latitude',
+                longitudeProperty: 'longitude',
+                relationshipWeightProperty: 'weight'
+            }})
+            YIELD index, sourceNode, targetNode, totalCost, nodeIds, costs, path
+            RETURN
+                index,
+                gds.util.asNode(sourceNode).name AS sourceNodeName,
+                gds.util.asNode(targetNode).name AS targetNodeName,
+                totalCost,
+                [nodeId IN nodeIds | gds.util.asNode(nodeId).name] AS nodeNames,
+                costs,
+                nodes(path) as path
+            ORDER BY index
+        """
+
+    with driver.session() as session:
+        # Delete any existing projected graph
+        session.run("CALL gds.graph.drop('supplyChainGraph', false)")
+
+        # Create the graph for A* algorithm
+        session.run(query_project_graph)
+
+        # Execute A* algorithm and find the shortest path
+        result = session.run(query_astar_algo, source_node=source_node, target_node=target_node)
+
+        # Print the shortest path and cost
+        print(f"Shortest path from {source_node} to {target_node}:")
+        for record in result:
+            print(f"Path: {' -> '.join(record['nodeNames'])}, Total Cost: {record['totalCost']}")
+
+    # Close the driver
+    driver.close()
+
+# Source and target nodes
+source_node = "Factory A"
+target_node = "Retail Store C"
+
+
 def main():
     # Call the function to convert the NetworkX graph to Neo4j
     networkx_to_neo4j(G, uri, user, password)
 
-
+    # Run the A* algorithm
+    run_astar_algo(uri, user, password, source_node, target_node)
 
 if __name__ == "__main__":
     main()
